@@ -1,0 +1,93 @@
+# -----------------------------------------------------------------------------
+# Docker Compose Setup for Flight Operations Analytics
+#
+# Provisions a complete Apache Airflow environment with PostgreSQL as the metadata store.
+# Uses an init container to bootstrap the database and create an admin user, then
+# runs the scheduler and webserver as separate services. DAGs, scripts, logs, and
+# data are mounted as volumes for modularity and persistence. This setup mirrors
+# production deployments with clear separation of concerns, resilience, and
+# analytics-ready orchestration.
+# -----------------------------------------------------------------------------
+
+services:
+  postgres:                           # PostgreSQL database service for Airflow metadata
+    image: postgres:15                # Use official Postgres v15 image
+    container_name: airflow-postgres  # Name of the container
+    restart: always                   # Always restart if container stops
+    environment:                      # Environment variables for DB credentials
+      POSTGRES_USER: ${POSTGRES_USER}         # Database username (from .env file)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD} # Database password (from .env file)
+      POSTGRES_DB: ${POSTGRES_DB}             # Database name (from .env file)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persist Postgres data outside container
+    ports:
+      - "5432:5432"                   # Expose Postgres on default port
+
+  airflow-init:                       # One-time initialization service for Airflow
+    image: apache/airflow:2.9.3       # Use official Airflow v2.9.3 image
+    container_name: airflow-init      # Name of the init container
+    depends_on:
+      - postgres                      # Wait until Postgres is ready
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False" # Disable example DAGs
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+                                       # Connection string to Postgres DB
+    entrypoint: /bin/bash              # Run bash commands inside container
+    command: >                         # Commands to initialize Airflow DB
+      -c "
+      echo 'Waiting for PostgreSQL...' &&
+      sleep 10 &&                      # Wait for Postgres to fully start
+      airflow db init &&               # Initialize Airflow metadata tables
+      airflow db migrate &&            # Apply schema migrations
+      airflow users create             # Create initial Airflow admin user
+        --username ${AIRFLOW_ADMIN_USER}
+        --firstname ${AIRFLOW_ADMIN_FIRSTNAME}
+        --lastname ${AIRFLOW_ADMIN_LASTNAME}
+        --role Admin
+        --email ${AIRFLOW_ADMIN_EMAIL}
+        --password ${AIRFLOW_ADMIN_PASSWORD} &&
+      echo '✅ Airflow DB initialized successfully.'"
+
+  airflow-webserver:                   # Airflow Webserver (UI)
+    image: apache/airflow:2.9.3        # Use official Airflow v2.9.3 image
+    container_name: airflow-webserver  # Name of the webserver container
+    restart: always                    # Restart if stopped
+    depends_on:
+      - airflow-init                   # Ensure DB is initialized
+      - airflow-scheduler              # Scheduler must be running
+      - postgres                       # Database must be ready
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False" # Disable example DAGs
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+                                        # Connection string to Postgres DB
+    volumes:                           # Mount local folders into container
+      - ./dags:/opt/airflow/dags       # DAG definitions
+      - ./scripts:/opt/airflow/scripts # Python scripts for tasks
+      - ./logs:/opt/airflow/logs       # Task logs
+      - ./plugins:/opt/airflow/plugins # Custom plugins
+      - ./data:/opt/airflow/data       # Data files (bronze/silver/gold)
+    ports:
+      - "8080:8080"                    # Expose Airflow UI on localhost:8080
+    command: webserver                 # Run Airflow webserver process
+
+  airflow-scheduler:                   # Airflow Scheduler service
+    image: apache/airflow:2.9.3        # Use official Airflow v2.9.3 image
+    container_name: airflow-scheduler  # Name of the scheduler container
+    restart: always                    # Restart if stopped
+    depends_on:
+      - airflow-init                   # Ensure DB is initialized
+      - postgres                       # Database must be ready
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False" # Disable example DAGs
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+                                       # Connection string to Postgres DB
+    volumes:                           # Mount local folders into container
+      - ./dags:/opt/airflow/dags       # DAG definitions
+      - ./scripts:/opt/airflow/scripts # Python scripts for tasks
+      - ./logs:/opt/airflow/logs       # Task logs
+      - ./plugins:/opt/airflow/plugins # Custom plugins
+      - ./data:/opt/airflow/data       # Data files (bronze/silver/gold)
+    command: scheduler                 # Run Airflow scheduler process
+
+volumes:
+  postgres_data:                       # Named volume for persisting Postgres data
